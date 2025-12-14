@@ -9,7 +9,7 @@ api_key = os.getenv("GEMINI_API_KEY")
 
 # Option B: Paste it here directly just for this test (delete it after!)
 if not api_key:
-    api_key = "PASTE_YOUR_API_KEY_HERE"
+    api_key = "AIzaSyCPfwYsfaQonfUw5bvyo_b1OFbYZCPGOLQ"
 
 genai.configure(api_key=api_key)
 
