@@ -1,72 +1,74 @@
 import streamlit as st
 import praw
-import google.generativeai as genai
+from openai import OpenAI
 import json
 import os
 import time
 
 # --- 1. PAGE CONFIGURATION ---
-st.set_page_config(page_title="Universal Insight Engine", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Universal Insight Engine (OpenAI)", page_icon="🧠", layout="wide")
 
 # --- 2. SIDEBAR: CREDENTIALS & SETTINGS ---
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # 1. API Keys
     with st.expander("🔑 API Keys", expanded=True):
         env_reddit_id = os.getenv("REDDIT_CLIENT_ID", "")
         env_reddit_secret = os.getenv("REDDIT_CLIENT_SECRET", "")
-        env_gemini_key = os.getenv("GEMINI_API_KEY", "")
+        env_openai_key = os.getenv("OPENAI_API_KEY", "")
 
         reddit_client_id = st.text_input("Reddit Client ID", value=env_reddit_id, type="password")
         reddit_client_secret = st.text_input("Reddit Client Secret", value=env_reddit_secret, type="password")
-        gemini_api_key = st.text_input("Gemini API Key", value=env_gemini_key, type="password")
+        openai_api_key = st.text_input("OpenAI API Key", value=env_openai_key, type="password")
     
-    # 2. Model Selector (The Fix for 404 Errors)
     st.divider()
     st.subheader("🤖 AI Model")
-    # We provide a list of likely valid models. If one 404s, try another.
-    model_options = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-pro", "gemini-pro"]
-    selected_model = st.selectbox("Select Model Version", model_options, index=0)
+    # OpenAI Model Options
+    model_options = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]
+    selected_model = st.selectbox("Select Model Version", model_options, index=1) # Default to mini (cheaper)
     
     if st.button("Save & Connect"):
-        if reddit_client_id and gemini_api_key:
+        if reddit_client_id and openai_api_key:
             st.session_state['credentials_set'] = True
             st.success("Credentials Loaded!")
         else:
             st.error("Please fill in all keys.")
 
-# --- 3. CORE LOGIC (THE BRAINS) ---
+# --- 3. CORE LOGIC (OPENAI VERSION) ---
 
 def generate_recipe(user_query, model_name):
     """
     Brain 1: The Architect. Converts natural language -> JSON Recipe.
     """
     try:
-        genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel(model_name)
+        client = OpenAI(api_key=openai_api_key)
         
-        prompt = f"""
-        You are a Research Architect. Convert this User Goal into a strict JSON configuration for a Reddit scraper.
-        
-        USER GOAL: "{user_query}"
-        
-        Output JSON ONLY with this structure:
-        {{
+        system_prompt = """
+        You are a Research Architect. Convert the User Goal into a strict JSON configuration for a Reddit scraper.
+        Output JSON ONLY. No markdown, no conversational text.
+        Structure:
+        {
           "project_name": "Short Name",
-          "target_subreddits": ["list", "of", "5", "most", "relevant", "subreddits"],
-          "search_keywords": ["list", "of", "5", "specific", "search", "terms"],
-          "ai_instruction": "Specific instructions on what data to extract (e.g. prices, pros/cons, specific features)."
-        }}
+          "target_subreddits": ["list", "of", "5", "subreddits"],
+          "search_keywords": ["list", "of", "5", "keywords"],
+          "ai_instruction": "Specific data extraction goal"
+        }
         """
-        response = model.generate_content(prompt)
-        # Clean up markdown if AI adds it
-        clean_json = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_json)
+        
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"USER GOAL: {user_query}"}
+            ],
+            response_format={"type": "json_object"} # OpenAI's native JSON mode ensures valid JSON
+        )
+        
+        content = response.choices[0].message.content
+        return json.loads(content)
         
     except Exception as e:
         st.error(f"❌ Error generating recipe: {e}")
-        st.warning("Tip: Try selecting a different Model Version in the sidebar (e.g., 'gemini-pro').")
         return None
 
 def run_universal_engine(recipe, model_name):
@@ -78,7 +80,7 @@ def run_universal_engine(recipe, model_name):
         reddit = praw.Reddit(
             client_id=reddit_client_id,
             client_secret=reddit_client_secret,
-            user_agent="UniversalEngine/2.0"
+            user_agent="UniversalEngine/OpenAI_v1"
         )
     except Exception as e:
         return f"Error connecting to Reddit: {e}"
@@ -91,106 +93,89 @@ def run_universal_engine(recipe, model_name):
     total_subs = len(recipe['target_subreddits'])
     
     for i, sub in enumerate(recipe['target_subreddits']):
-        status_text.markdown(f"🕵️ Scanning **r/{sub}** for '{recipe['project_name']}'...")
+        status_text.markdown(f"🕵️ Scanning **r/{sub}**...")
         progress_bar.progress((i + 1) / total_subs)
         
         try:
             subreddit = reddit.subreddit(sub)
             query = " OR ".join(recipe['search_keywords'])
             
-            # Fetch last 15 relevant posts
+            # Fetch last 15 posts
             for post in subreddit.search(query, sort="relevance", time_filter="month", limit=15):
-                # Simple filter to skip low quality posts
                 if post.num_comments > 2: 
-                    post_content = f"Title: {post.title}\nBody: {post.selftext[:800]}\nUrl: {post.url}"
-                    collected_data.append(post_content)
+                    collected_data.append(f"Title: {post.title}\nBody: {post.selftext[:800]}\nUrl: {post.url}")
+                time.sleep(0.2) # Polite delay
                 
         except Exception as e:
             st.warning(f"Skipped r/{sub}: {e}")
 
-    # 3. Final Analysis (The Verdict)
-    status_text.text("🧠 Analyzing collected data with AI...")
+    # 3. Final Analysis
+    status_text.text("🧠 Analyzing collected data with OpenAI...")
     
     if not collected_data:
-        return "⚠️ No relevant data found. Try broader keywords in the Strategy editor."
+        return "⚠️ No relevant data found. Try broader keywords."
 
-    # Send aggregated data to Gemini for the Final Report
-    full_text_blob = "\n---\n".join(collected_data[:25]) # Limit to 25 posts
+    full_text_blob = "\n---\n".join(collected_data[:25])
     
-    final_prompt = f"""
+    client = OpenAI(api_key=openai_api_key)
+    
+    final_system_prompt = f"""
     You are a Senior Market Analyst.
-    
     PROJECT: {recipe['project_name']}
     GOAL: {recipe['ai_instruction']}
     
-    RAW DATA FROM REDDIT:
-    {full_text_blob}
-    
     TASK:
-    Write a clear, structured Executive Report. 
-    - Highlight the "Winners" (Products/Ideas).
-    - Expose the "Red Flags" (Complaints/Risks).
-    - Provide a direct answer to the user's goal.
-    - Use Markdown formatting (Bold, Bullet points, Tables).
+    Write a clear, structured Executive Report based on the provided Reddit data.
+    - Highlight 'Winners' and 'Red Flags'.
+    - Use Markdown (Bold, Tables, Bullet points).
+    - Be specific (mention specific brands/tools found in text).
     """
     
     try:
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(final_prompt)
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": final_system_prompt},
+                {"role": "user", "content": f"RAW DATA:\n{full_text_blob}"}
+            ]
+        )
         status_text.empty()
         progress_bar.empty()
-        return response.text
+        return response.choices[0].message.content
+        
     except Exception as e:
-        return f"❌ AI Analysis Failed: {e}"
+        return f"❌ Analysis Failed: {e}"
 
 # --- 4. THE USER INTERFACE ---
 
-st.title("🚀 Universal Insight Engine")
-st.markdown("""
-**Research anything on Reddit.** Describe your goal, and the AI will build a custom strategy.
-""")
+st.title("🚀 Universal Insight Engine (OpenAI)")
+st.markdown("Research anything on Reddit. Describe your goal, and the AI will build a strategy.")
 
-# Input Area
-user_query = st.text_area("What do you want to find out?", 
-                          placeholder="e.g., What are the best investment banks in UAE right now? or Compare the top 3 recruiter tools.",
-                          height=100)
+user_query = st.text_area("What do you want to find out?", placeholder="e.g. Compare top recruiter tools or Find best credit cards in Dubai", height=100)
 
 if st.button("Generate Strategy"):
     if not st.session_state.get('credentials_set'):
-        st.error("Please enter your API Keys in the Sidebar first!")
+        st.error("Enter Keys in Sidebar!")
     elif not user_query:
-        st.warning("Please enter a topic.")
+        st.warning("Enter a topic.")
     else:
-        with st.spinner("🤖 AI is designing your research strategy..."):
+        with st.spinner("🤖 Designing strategy..."):
             recipe = generate_recipe(user_query, selected_model)
             if recipe:
                 st.session_state['current_recipe'] = recipe
                 st.success("Strategy Created!")
 
-# Display Recipe & Run Button
 if 'current_recipe' in st.session_state:
     st.divider()
-    st.subheader("📋 Research Strategy (Editable)")
-    
-    # Allow user to edit the JSON before running
+    st.subheader("📋 Research Strategy")
     edited_recipe = st.data_editor(st.session_state['current_recipe'], num_rows="dynamic")
     
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        if st.button("🚀 Launch Research", type="primary"):
-            with st.spinner("Running Universal Engine... (This may take 30s)"):
-                report = run_universal_engine(edited_recipe, selected_model)
-                st.session_state['final_report'] = report
+    if st.button("🚀 Launch Research", type="primary"):
+        with st.spinner("Running Engine..."):
+            report = run_universal_engine(edited_recipe, selected_model)
+            st.session_state['final_report'] = report
 
-# Final Report Display
 if 'final_report' in st.session_state:
     st.divider()
-    st.subheader("📊 Final Intelligence Report")
+    st.subheader("📊 Final Report")
     st.markdown(st.session_state['final_report'])
-    
-    st.download_button(
-        label="📥 Download Report",
-        data=st.session_state['final_report'],
-        file_name="reddit_insight_report.md",
-        mime="text/markdown"
-    )
