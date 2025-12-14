@@ -34,40 +34,37 @@ with st.sidebar:
         else:
             st.error("Please fill in all keys.")
 
-# --- HELPER: NUCLEAR DATA EXTRACTOR ---
+# --- HELPER: DATA EXTRACTOR ---
 def get_list_from_data(data, column_name):
     """
-    Uses Pandas to force-find the column, no matter how the data is structured.
+    Robustly finds a column in the data, handling any format Streamlit throws at us.
     """
     try:
-        # 1. Force convert to DataFrame
+        # Convert whatever we have into a Pandas DataFrame
         if isinstance(data, list):
             df = pd.DataFrame(data)
         elif isinstance(data, dict):
-            # Handle the specific case where keys are row indices (from your screenshot)
-            df = pd.DataFrame.from_dict(data, orient='index') if "0" in data else pd.DataFrame([data])
+            df = pd.DataFrame([data])
         elif isinstance(data, pd.DataFrame):
             df = data
         else:
             return []
 
-        # 2. Normalize Column Names (Lowercase & Strip spaces)
+        # clean column names
         df.columns = [str(c).lower().strip() for c in df.columns]
-        target_col = column_name.lower().strip()
+        target = column_name.lower().strip()
 
-        # 3. Find the column
-        if target_col in df.columns:
-            return df[target_col].dropna().astype(str).tolist()
+        # Find the column
+        if target in df.columns:
+            return df[target].dropna().astype(str).tolist()
         
-        # 4. Fallback: Search for any column that contains the target string
+        # Fallback: Check if any column contains the name
         for col in df.columns:
-            if target_col in col:
+            if target in col:
                 return df[col].dropna().astype(str).tolist()
-                
-        return []
 
-    except Exception as e:
-        st.error(f"Data Extraction Error: {e}")
+        return []
+    except:
         return []
 
 # --- 3. CORE LOGIC ---
@@ -76,24 +73,19 @@ def generate_recipe(user_query, model_name):
     try:
         client = OpenAI(api_key=openai_api_key)
         
+        # WE FORCE THE AI TO GENERATE A LIST OF 5 OBJECTS
         system_prompt = """
-        You are a Research Architect. Convert the User Goal into a strict JSON configuration.
-        Output JSON ONLY.
+        You are a Research Architect. 
+        Create a search strategy for the User's Goal.
+        
+        CRITICAL RULE: You must return a JSON LIST of exactly 5 distinct dictionaries (rows). 
+        Do not group them into one line.
         
         Structure:
         [
-          {
-            "project_name": "Short Name",
-            "target_subreddits": "r/subreddit1",
-            "search_keywords": "keyword1",
-            "ai_instruction": "What to extract"
-          },
-          {
-            "project_name": "Short Name",
-            "target_subreddits": "r/subreddit2",
-            "search_keywords": "keyword2",
-            "ai_instruction": "What to extract"
-          }
+           { "target_subreddit": "r/example1", "search_keywords": "keyword1 OR keyword2", "ai_instruction": "Extract pricing" },
+           { "target_subreddit": "r/example2", "search_keywords": "keyword3", "ai_instruction": "Extract features" },
+           ... (3 more rows)
         ]
         """
         
@@ -101,20 +93,20 @@ def generate_recipe(user_query, model_name):
             model=model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"USER GOAL: {user_query}. Generate 5 rows."}
+                {"role": "user", "content": f"USER GOAL: {user_query}"}
             ],
             response_format={"type": "json_object"}
         )
         
         content = response.choices[0].message.content
-        
-        # Handle cases where AI wraps the list in a dict key
         parsed = json.loads(content)
+        
+        # Handle if AI wraps it in a key like {"strategy": [...]}
         if isinstance(parsed, dict):
-            # Grab the first list found in values
             for v in parsed.values():
                 if isinstance(v, list): return v
-            return [parsed] # Return as single row list
+            # If no list found, wrap the dict in a list
+            return [parsed]
             
         return parsed
         
@@ -128,63 +120,71 @@ def run_universal_engine(recipe, model_name):
         reddit = praw.Reddit(
             client_id=reddit_client_id,
             client_secret=reddit_client_secret,
-            user_agent="UniversalEngine/Nuclear_v7"
+            user_agent="UniversalEngine/Visible_v9"
         )
     except Exception as e:
         return f"Error connecting to Reddit: {e}"
 
     collected_data = []
-    status_text = st.empty()
-    progress_bar = st.progress(0)
     
-    # 2. EXTRACT TARGETS (Nuclear Method)
-    targets = get_list_from_data(recipe, 'target_subreddits')
+    # 2. EXTRACT TARGETS
+    targets = get_list_from_data(recipe, 'target_subreddit') # Note singular 'subreddit'
+    # fallback to plural if needed
+    if not targets: targets = get_list_from_data(recipe, 'target_subreddits')
+        
     keywords = get_list_from_data(recipe, 'search_keywords')
     
-    # Debugging: Show what we found if it fails
-    if not targets:
-        st.error("Debug Info: Could not find 'target_subreddits'.")
-        st.write("Data received by Engine:", recipe)
-        return "❌ Error: No subreddits found. Check the table above."
+    # Clean up the list
+    targets = [str(t).replace("r/", "").strip() for t in targets if t]
+    targets = list(set(targets)) # Remove duplicates
 
-    # Remove duplicates and clean
-    targets = list(set(targets))
-    total_subs = len(targets)
-    
-    # 3. Scan Subreddits
-    for i, sub in enumerate(targets):
-        clean_sub = str(sub).replace("r/", "").replace("R/", "").strip()
+    if not targets:
+        return "❌ Error: No subreddits found. Please click 'Generate Strategy' again."
+
+    # 3. VISIBLE SCANNING LOOP
+    with st.status("🕵️ Scouring Reddit...", expanded=True) as status:
         
-        status_text.markdown(f"🕵️ Scanning **r/{clean_sub}**...")
-        if total_subs > 0:
-            progress_bar.progress((i + 1) / total_subs)
-        
-        try:
-            subreddit = reddit.subreddit(clean_sub)
-            # Use all keywords combined
-            query = " OR ".join([str(k) for k in keywords[:5]]) # Limit to 5 keywords for query length
-            
-            for post in subreddit.search(query, sort="relevance", time_filter="month", limit=10):
-                if post.num_comments > 1: 
-                    collected_data.append(f"Title: {post.title}\nBody: {post.selftext[:800]}\nUrl: {post.url}")
-                time.sleep(0.1) 
+        for i, sub in enumerate(targets):
+            try:
+                st.write(f"**Scanning r/{sub}...**")
+                subreddit = reddit.subreddit(sub)
                 
-        except Exception as e:
-            print(f"Skipped r/{clean_sub}: {e}")
+                # Get specific keywords for this row if possible, else use first
+                query = keywords[i] if i < len(keywords) else keywords[0]
+                
+                posts_found = 0
+                # Fetch last 15 posts
+                for post in subreddit.search(query, sort="relevance", time_filter="month", limit=15):
+                    if post.num_comments > 0: 
+                        collected_data.append(f"Source: r/{sub}\nTitle: {post.title}\nBody: {post.selftext[:500]}\nUrl: {post.url}")
+                        posts_found += 1
+                
+                if posts_found > 0:
+                    st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;✅ Found {posts_found} posts.")
+                else:
+                    st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;⚠️ No recent results.")
+                    
+                time.sleep(0.5) 
+                
+            except Exception as e:
+                st.write(f"&nbsp;&nbsp;&nbsp;&nbsp;❌ Failed to access: {e}")
+
+        status.update(label="Scanning Complete!", state="complete", expanded=False)
 
     # 4. Final Analysis
-    status_text.text("🧠 Analyzing collected data with OpenAI...")
-    
     if not collected_data:
-        return f"⚠️ No relevant data found in {len(targets)} subreddits. Try changing your Keywords."
+        return f"⚠️ No relevant data found. Try broader keywords."
 
-    full_text_blob = "\n---\n".join(collected_data[:20])
+    full_text_blob = "\n---\n".join(collected_data[:40])
     
     client = OpenAI(api_key=openai_api_key)
     
     final_system_prompt = f"""
     You are a Senior Market Analyst.
-    TASK: Write a structured Executive Report (Markdown). Highlight Winners, Risks, and Sentiment.
+    TASK: Write a structured Executive Report (Markdown) based ONLY on the provided Reddit data.
+    - Highlight "Winners" (Products/Tools mentioned positively).
+    - Highlight "Complaints" (Specific negatives).
+    - Quote specific user sentiments.
     """
     
     try:
@@ -195,8 +195,6 @@ def run_universal_engine(recipe, model_name):
                 {"role": "user", "content": f"RAW DATA:\n{full_text_blob}"}
             ]
         )
-        status_text.empty()
-        progress_bar.empty()
         return response.choices[0].message.content
         
     except Exception as e:
@@ -219,7 +217,7 @@ if st.button("Generate Strategy"):
             recipe = generate_recipe(user_query, selected_model)
             if recipe:
                 st.session_state['current_recipe'] = recipe
-                st.success("Strategy Created!")
+                st.success("Strategy Created! Check the table below to see the 5 targets.")
 
 if 'current_recipe' in st.session_state:
     st.divider()
@@ -229,9 +227,9 @@ if 'current_recipe' in st.session_state:
     edited_recipe = st.data_editor(st.session_state['current_recipe'], num_rows="dynamic", use_container_width=True)
     
     if st.button("🚀 Launch Research", type="primary"):
-        with st.spinner("Running Engine..."):
-            report = run_universal_engine(edited_recipe, selected_model)
-            st.session_state['final_report'] = report
+        # We don't use st.spinner here because we use the custom st.status inside the function
+        report = run_universal_engine(edited_recipe, selected_model)
+        st.session_state['final_report'] = report
 
 if 'final_report' in st.session_state:
     st.divider()
