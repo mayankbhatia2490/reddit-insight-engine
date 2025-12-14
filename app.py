@@ -34,48 +34,52 @@ with st.sidebar:
         else:
             st.error("Please fill in all keys.")
 
-# --- HELPER: SMART DATA EXTRACTOR (Fixed for AttributeError) ---
+# --- HELPER: ROBUST DATA EXTRACTOR (The Fix) ---
 def get_list_from_data(data, column_name):
     """
-    Robustly extracts a list of values from ANY data structure (Dict, List of Rows, or DataFrame).
-    Safely handles non-string keys to prevent AttributeErrors.
+    Extracts a list of values from ANY data structure (Dict, List, or DataFrame).
+    Safely handles integers/row-indices to prevent crashes.
     """
-    # 1. If it's a Dictionary (Standard)
+    # 1. If it's a DataFrame (The likely format from your screenshot)
+    if isinstance(data, pd.DataFrame):
+        # Try finding the column safely
+        matches = [c for c in data.columns if str(c).lower() == column_name.lower()]
+        if matches:
+            return data[matches[0]].dropna().astype(str).tolist()
+        return []
+
+    # 2. If it's a Dictionary (JSON)
     if isinstance(data, dict):
-        # Check exact key first
+        # Direct check
         if column_name in data:
             val = data[column_name]
-            if isinstance(val, list): return val
-            return [str(val)]
-            
-        # Check for matching keys (case-insensitive) - SAFE MODE
+            return val if isinstance(val, list) else [str(val)]
+        
+        # Case-insensitive check (ignoring integer keys!)
         for key in data.keys():
-            # Only run .lower() if the key is actually a string!
-            if isinstance(key, str):
+            if isinstance(key, str): # <--- THIS FIXES THE CRASH
                 if key.lower() == column_name.lower():
                     val = data[key]
                     return val if isinstance(val, list) else [str(val)]
-
-    # 2. If it's a DataFrame (Streamlit Table View)
-    if isinstance(data, pd.DataFrame):
-        # Check if the column exists
-        if column_name in data.columns:
-            return data[column_name].dropna().tolist()
         
-        # Fallback: Check case-insensitive column names
-        for col in data.columns:
-            if str(col).lower() == column_name.lower():
-                 return data[col].dropna().tolist()
+        # Fallback: If dict keys are integers (row numbers), try looking inside values
+        # This handles the case where Streamlit returns {0: 'val', 1: 'val'}
+        first_val = next(iter(data.values()), None)
+        if isinstance(first_val, dict) and column_name in first_val:
+             return [row[column_name] for row in data.values() if column_name in row]
 
-    # 3. If it's a List of Dictionaries (Rows)
+    # 3. If it's a List of Rows
     if isinstance(data, list):
         extracted = []
         for row in data:
-            if isinstance(row, dict) and column_name in row:
-                extracted.append(row[column_name])
+            if isinstance(row, dict):
+                # Check keys safely
+                for k, v in row.items():
+                    if str(k).lower() == column_name.lower():
+                        extracted.append(v)
         if extracted: return extracted
 
-    return [] # Failed to find anything
+    return [] # Found nothing
 
 # --- 3. CORE LOGIC ---
 
@@ -118,7 +122,7 @@ def run_universal_engine(recipe, model_name):
         reddit = praw.Reddit(
             client_id=reddit_client_id,
             client_secret=reddit_client_secret,
-            user_agent="UniversalEngine/Fix_v4"
+            user_agent="UniversalEngine/Fix_v5"
         )
     except Exception as e:
         return f"Error connecting to Reddit: {e}"
@@ -127,18 +131,21 @@ def run_universal_engine(recipe, model_name):
     status_text = st.empty()
     progress_bar = st.progress(0)
     
-    # 2. ROBUST EXTRACTION
+    # 2. EXTRACT TARGETS (Safely)
     targets = get_list_from_data(recipe, 'target_subreddits')
     keywords = get_list_from_data(recipe, 'search_keywords')
     
-    # Fallback for keywords
-    if not keywords:
-        keywords = ["review", "discussion"]
-
+    # Debugging help if it's still empty
     if not targets:
-        # Debugging info if it fails
-        st.write("Debug Data Structure:", recipe)
-        return "⚠️ Error: Could not find 'target_subreddits'. See debug info above."
+        st.warning("⚠️ Could not find 'target_subreddits'. Using Fallback.")
+        # Fallback: If keywords exist but subreddits don't, try scanning 'all'
+        if keywords: 
+            targets = ["all"]
+        else:
+            return "❌ Error: Strategy is empty. Please regenerate."
+
+    if not keywords:
+        keywords = ["discussion", "review"]
 
     total_subs = len(targets)
     
@@ -154,6 +161,7 @@ def run_universal_engine(recipe, model_name):
             subreddit = reddit.subreddit(clean_sub)
             query = " OR ".join([str(k) for k in keywords])
             
+            # Fetch last 10 posts
             for post in subreddit.search(query, sort="relevance", time_filter="month", limit=10):
                 if post.num_comments > 1: 
                     collected_data.append(f"Title: {post.title}\nBody: {post.selftext[:800]}\nUrl: {post.url}")
@@ -214,7 +222,9 @@ if st.button("Generate Strategy"):
 if 'current_recipe' in st.session_state:
     st.divider()
     st.subheader("📋 Research Strategy")
-    edited_recipe = st.data_editor(st.session_state['current_recipe'], num_rows="dynamic")
+    
+    # We force the data editor to be more forgiving
+    edited_recipe = st.data_editor(st.session_state['current_recipe'], num_rows="dynamic", use_container_width=True)
     
     if st.button("🚀 Launch Research", type="primary"):
         with st.spinner("Running Engine..."):
