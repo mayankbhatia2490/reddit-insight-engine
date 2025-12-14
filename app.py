@@ -34,52 +34,59 @@ with st.sidebar:
         else:
             st.error("Please fill in all keys.")
 
-# --- HELPER: ROBUST DATA EXTRACTOR (The Fix) ---
+# --- HELPER: BULLETPROOF DATA EXTRACTOR ---
 def get_list_from_data(data, column_name):
     """
-    Extracts a list of values from ANY data structure (Dict, List, or DataFrame).
-    Safely handles integers/row-indices to prevent crashes.
+    Extracts a clean list of strings from ANY data structure Streamlit returns.
     """
-    # 1. If it's a DataFrame (The likely format from your screenshot)
-    if isinstance(data, pd.DataFrame):
-        # Try finding the column safely
-        matches = [c for c in data.columns if str(c).lower() == column_name.lower()]
-        if matches:
-            return data[matches[0]].dropna().astype(str).tolist()
-        return []
+    try:
+        # CASE 1: It's a Pandas DataFrame (The Table View)
+        if isinstance(data, pd.DataFrame):
+            # Check for exact column match
+            if column_name in data.columns:
+                return data[column_name].dropna().astype(str).tolist()
+            
+            # Check for case-insensitive match (e.g., 'Target_Subreddits' vs 'target_subreddits')
+            for col in data.columns:
+                if str(col).lower().strip() == column_name.lower().strip():
+                    return data[col].dropna().astype(str).tolist()
+            
+            # Fallback: If no column matches, maybe the user put data in the first column?
+            # This happens if the AI generates a list without headers.
+            if not data.empty:
+                return data.iloc[:, 0].dropna().astype(str).tolist()
 
-    # 2. If it's a Dictionary (JSON)
-    if isinstance(data, dict):
-        # Direct check
-        if column_name in data:
-            val = data[column_name]
-            return val if isinstance(val, list) else [str(val)]
-        
-        # Case-insensitive check (ignoring integer keys!)
-        for key in data.keys():
-            if isinstance(key, str): # <--- THIS FIXES THE CRASH
-                if key.lower() == column_name.lower():
+        # CASE 2: It's a standard Dictionary (JSON)
+        if isinstance(data, dict):
+            # Direct access
+            if column_name in data:
+                val = data[column_name]
+                return val if isinstance(val, list) else [str(val)]
+            
+            # Case-insensitive access
+            for key in data.keys():
+                if str(key).lower().strip() == column_name.lower().strip():
                     val = data[key]
                     return val if isinstance(val, list) else [str(val)]
-        
-        # Fallback: If dict keys are integers (row numbers), try looking inside values
-        # This handles the case where Streamlit returns {0: 'val', 1: 'val'}
-        first_val = next(iter(data.values()), None)
-        if isinstance(first_val, dict) and column_name in first_val:
-             return [row[column_name] for row in data.values() if column_name in row]
 
-    # 3. If it's a List of Rows
-    if isinstance(data, list):
-        extracted = []
-        for row in data:
-            if isinstance(row, dict):
-                # Check keys safely
-                for k, v in row.items():
-                    if str(k).lower() == column_name.lower():
-                        extracted.append(v)
-        if extracted: return extracted
+        # CASE 3: It's a List of rows
+        if isinstance(data, list):
+            extracted = []
+            for row in data:
+                if isinstance(row, dict):
+                    # Find value inside the row dict
+                    for k, v in row.items():
+                        if str(k).lower().strip() == column_name.lower().strip():
+                            extracted.append(str(v))
+                elif isinstance(row, str):
+                    extracted.append(row)
+            return extracted
 
-    return [] # Found nothing
+    except Exception as e:
+        print(f"Extraction Error: {e}")
+        return []
+
+    return []
 
 # --- 3. CORE LOGIC ---
 
@@ -122,7 +129,7 @@ def run_universal_engine(recipe, model_name):
         reddit = praw.Reddit(
             client_id=reddit_client_id,
             client_secret=reddit_client_secret,
-            user_agent="UniversalEngine/Fix_v5"
+            user_agent="UniversalEngine/FinalFix_v6"
         )
     except Exception as e:
         return f"Error connecting to Reddit: {e}"
@@ -131,21 +138,20 @@ def run_universal_engine(recipe, model_name):
     status_text = st.empty()
     progress_bar = st.progress(0)
     
-    # 2. EXTRACT TARGETS (Safely)
+    # 2. EXTRACT TARGETS (With Bulletproof Helper)
     targets = get_list_from_data(recipe, 'target_subreddits')
     keywords = get_list_from_data(recipe, 'search_keywords')
     
-    # Debugging help if it's still empty
+    # Fallback if extraction fails but we have keywords
+    if not targets and keywords:
+         st.warning("Could not find specific subreddits. Defaulting to r/all.")
+         targets = ["all"]
+         
     if not targets:
-        st.warning("⚠️ Could not find 'target_subreddits'. Using Fallback.")
-        # Fallback: If keywords exist but subreddits don't, try scanning 'all'
-        if keywords: 
-            targets = ["all"]
-        else:
-            return "❌ Error: Strategy is empty. Please regenerate."
+        return "❌ Error: No subreddits found in your strategy. Please regenerate or check the table."
 
     if not keywords:
-        keywords = ["discussion", "review"]
+        keywords = ["discussion"]
 
     total_subs = len(targets)
     
