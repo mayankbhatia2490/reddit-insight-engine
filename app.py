@@ -34,30 +34,39 @@ with st.sidebar:
         else:
             st.error("Please fill in all keys.")
 
-# --- HELPER: SMART DATA EXTRACTOR (The Fix) ---
+# --- HELPER: SMART DATA EXTRACTOR (Fixed for AttributeError) ---
 def get_list_from_data(data, column_name):
     """
-    Robustly extracts a list of values (e.g. subreddits) from ANY data structure
-    (Dict, List of Rows, or DataFrame).
+    Robustly extracts a list of values from ANY data structure (Dict, List of Rows, or DataFrame).
+    Safely handles non-string keys to prevent AttributeErrors.
     """
     # 1. If it's a Dictionary (Standard)
     if isinstance(data, dict):
-        # Check exact key
+        # Check exact key first
         if column_name in data:
             val = data[column_name]
             if isinstance(val, list): return val
             return [str(val)]
-        # Check for matching keys (case-insensitive)
+            
+        # Check for matching keys (case-insensitive) - SAFE MODE
         for key in data.keys():
-            if key.lower() == column_name.lower():
-                val = data[key]
-                return val if isinstance(val, list) else [str(val)]
+            # Only run .lower() if the key is actually a string!
+            if isinstance(key, str):
+                if key.lower() == column_name.lower():
+                    val = data[key]
+                    return val if isinstance(val, list) else [str(val)]
 
-    # 2. If it's a DataFrame (Table view like in your screenshot)
+    # 2. If it's a DataFrame (Streamlit Table View)
     if isinstance(data, pd.DataFrame):
+        # Check if the column exists
         if column_name in data.columns:
             return data[column_name].dropna().tolist()
         
+        # Fallback: Check case-insensitive column names
+        for col in data.columns:
+            if str(col).lower() == column_name.lower():
+                 return data[col].dropna().tolist()
+
     # 3. If it's a List of Dictionaries (Rows)
     if isinstance(data, list):
         extracted = []
@@ -109,7 +118,7 @@ def run_universal_engine(recipe, model_name):
         reddit = praw.Reddit(
             client_id=reddit_client_id,
             client_secret=reddit_client_secret,
-            user_agent="UniversalEngine/Fix_v3"
+            user_agent="UniversalEngine/Fix_v4"
         )
     except Exception as e:
         return f"Error connecting to Reddit: {e}"
@@ -118,40 +127,39 @@ def run_universal_engine(recipe, model_name):
     status_text = st.empty()
     progress_bar = st.progress(0)
     
-    # 2. ROBUST EXTRACTION (Fixing the "No subreddits" error)
-    # We use the helper to find the list even if it's hidden in a table
+    # 2. ROBUST EXTRACTION
     targets = get_list_from_data(recipe, 'target_subreddits')
     keywords = get_list_from_data(recipe, 'search_keywords')
     
-    # Fallback: If keywords is empty, use the project name
-    if not keywords and isinstance(recipe, dict):
-        keywords = [recipe.get('project_name', 'review')]
+    # Fallback for keywords
+    if not keywords:
+        keywords = ["review", "discussion"]
 
     if not targets:
-        return "⚠️ Error: Could not find 'target_subreddits' in the data. Please ensure the column name matches."
+        # Debugging info if it fails
+        st.write("Debug Data Structure:", recipe)
+        return "⚠️ Error: Could not find 'target_subreddits'. See debug info above."
 
     total_subs = len(targets)
     
     # 3. Scan Subreddits
     for i, sub in enumerate(targets):
-        # Clean the subreddit name (Remove 'r/' if user added it, remove spaces)
         clean_sub = str(sub).replace("r/", "").replace("R/", "").strip()
         
         status_text.markdown(f"🕵️ Scanning **r/{clean_sub}**...")
-        progress_bar.progress((i + 1) / total_subs)
+        if total_subs > 0:
+            progress_bar.progress((i + 1) / total_subs)
         
         try:
             subreddit = reddit.subreddit(clean_sub)
             query = " OR ".join([str(k) for k in keywords])
             
-            # Fetch last 10 posts
             for post in subreddit.search(query, sort="relevance", time_filter="month", limit=10):
                 if post.num_comments > 1: 
                     collected_data.append(f"Title: {post.title}\nBody: {post.selftext[:800]}\nUrl: {post.url}")
                 time.sleep(0.1) 
                 
         except Exception as e:
-            # Don't stop the whole app, just warn about this one subreddit
             print(f"Skipped r/{clean_sub}: {e}")
 
     # 4. Final Analysis
@@ -164,14 +172,8 @@ def run_universal_engine(recipe, model_name):
     
     client = OpenAI(api_key=openai_api_key)
     
-    # Extract project name safely
-    p_name = "Research Project"
-    if isinstance(recipe, dict): p_name = recipe.get('project_name', p_name)
-    elif isinstance(recipe, pd.DataFrame) and 'project_name' in recipe.columns: p_name = recipe['project_name'].iloc[0]
-
     final_system_prompt = f"""
     You are a Senior Market Analyst.
-    PROJECT: {p_name}
     TASK: Write a structured Executive Report (Markdown). Highlight Winners, Risks, and Sentiment.
     """
     
@@ -212,7 +214,6 @@ if st.button("Generate Strategy"):
 if 'current_recipe' in st.session_state:
     st.divider()
     st.subheader("📋 Research Strategy")
-    # This editor handles both Dicts and DataFrames now
     edited_recipe = st.data_editor(st.session_state['current_recipe'], num_rows="dynamic")
     
     if st.button("🚀 Launch Research", type="primary"):
