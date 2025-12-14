@@ -34,59 +34,41 @@ with st.sidebar:
         else:
             st.error("Please fill in all keys.")
 
-# --- HELPER: BULLETPROOF DATA EXTRACTOR ---
+# --- HELPER: NUCLEAR DATA EXTRACTOR ---
 def get_list_from_data(data, column_name):
     """
-    Extracts a clean list of strings from ANY data structure Streamlit returns.
+    Uses Pandas to force-find the column, no matter how the data is structured.
     """
     try:
-        # CASE 1: It's a Pandas DataFrame (The Table View)
-        if isinstance(data, pd.DataFrame):
-            # Check for exact column match
-            if column_name in data.columns:
-                return data[column_name].dropna().astype(str).tolist()
-            
-            # Check for case-insensitive match (e.g., 'Target_Subreddits' vs 'target_subreddits')
-            for col in data.columns:
-                if str(col).lower().strip() == column_name.lower().strip():
-                    return data[col].dropna().astype(str).tolist()
-            
-            # Fallback: If no column matches, maybe the user put data in the first column?
-            # This happens if the AI generates a list without headers.
-            if not data.empty:
-                return data.iloc[:, 0].dropna().astype(str).tolist()
-
-        # CASE 2: It's a standard Dictionary (JSON)
-        if isinstance(data, dict):
-            # Direct access
-            if column_name in data:
-                val = data[column_name]
-                return val if isinstance(val, list) else [str(val)]
-            
-            # Case-insensitive access
-            for key in data.keys():
-                if str(key).lower().strip() == column_name.lower().strip():
-                    val = data[key]
-                    return val if isinstance(val, list) else [str(val)]
-
-        # CASE 3: It's a List of rows
+        # 1. Force convert to DataFrame
         if isinstance(data, list):
-            extracted = []
-            for row in data:
-                if isinstance(row, dict):
-                    # Find value inside the row dict
-                    for k, v in row.items():
-                        if str(k).lower().strip() == column_name.lower().strip():
-                            extracted.append(str(v))
-                elif isinstance(row, str):
-                    extracted.append(row)
-            return extracted
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            # Handle the specific case where keys are row indices (from your screenshot)
+            df = pd.DataFrame.from_dict(data, orient='index') if "0" in data else pd.DataFrame([data])
+        elif isinstance(data, pd.DataFrame):
+            df = data
+        else:
+            return []
 
-    except Exception as e:
-        print(f"Extraction Error: {e}")
+        # 2. Normalize Column Names (Lowercase & Strip spaces)
+        df.columns = [str(c).lower().strip() for c in df.columns]
+        target_col = column_name.lower().strip()
+
+        # 3. Find the column
+        if target_col in df.columns:
+            return df[target_col].dropna().astype(str).tolist()
+        
+        # 4. Fallback: Search for any column that contains the target string
+        for col in df.columns:
+            if target_col in col:
+                return df[col].dropna().astype(str).tolist()
+                
         return []
 
-    return []
+    except Exception as e:
+        st.error(f"Data Extraction Error: {e}")
+        return []
 
 # --- 3. CORE LOGIC ---
 
@@ -99,25 +81,42 @@ def generate_recipe(user_query, model_name):
         Output JSON ONLY.
         
         Structure:
-        {
-          "project_name": "Short Name",
-          "target_subreddits": ["list", "of", "5", "subreddits"],
-          "search_keywords": ["list", "of", "5", "keywords"],
-          "ai_instruction": "What to extract"
-        }
+        [
+          {
+            "project_name": "Short Name",
+            "target_subreddits": "r/subreddit1",
+            "search_keywords": "keyword1",
+            "ai_instruction": "What to extract"
+          },
+          {
+            "project_name": "Short Name",
+            "target_subreddits": "r/subreddit2",
+            "search_keywords": "keyword2",
+            "ai_instruction": "What to extract"
+          }
+        ]
         """
         
         response = client.chat.completions.create(
             model=model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"USER GOAL: {user_query}"}
+                {"role": "user", "content": f"USER GOAL: {user_query}. Generate 5 rows."}
             ],
             response_format={"type": "json_object"}
         )
         
         content = response.choices[0].message.content
-        return json.loads(content)
+        
+        # Handle cases where AI wraps the list in a dict key
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            # Grab the first list found in values
+            for v in parsed.values():
+                if isinstance(v, list): return v
+            return [parsed] # Return as single row list
+            
+        return parsed
         
     except Exception as e:
         st.error(f"❌ Error generating recipe: {e}")
@@ -129,7 +128,7 @@ def run_universal_engine(recipe, model_name):
         reddit = praw.Reddit(
             client_id=reddit_client_id,
             client_secret=reddit_client_secret,
-            user_agent="UniversalEngine/FinalFix_v6"
+            user_agent="UniversalEngine/Nuclear_v7"
         )
     except Exception as e:
         return f"Error connecting to Reddit: {e}"
@@ -138,21 +137,18 @@ def run_universal_engine(recipe, model_name):
     status_text = st.empty()
     progress_bar = st.progress(0)
     
-    # 2. EXTRACT TARGETS (With Bulletproof Helper)
+    # 2. EXTRACT TARGETS (Nuclear Method)
     targets = get_list_from_data(recipe, 'target_subreddits')
     keywords = get_list_from_data(recipe, 'search_keywords')
     
-    # Fallback if extraction fails but we have keywords
-    if not targets and keywords:
-         st.warning("Could not find specific subreddits. Defaulting to r/all.")
-         targets = ["all"]
-         
+    # Debugging: Show what we found if it fails
     if not targets:
-        return "❌ Error: No subreddits found in your strategy. Please regenerate or check the table."
+        st.error("Debug Info: Could not find 'target_subreddits'.")
+        st.write("Data received by Engine:", recipe)
+        return "❌ Error: No subreddits found. Check the table above."
 
-    if not keywords:
-        keywords = ["discussion"]
-
+    # Remove duplicates and clean
+    targets = list(set(targets))
     total_subs = len(targets)
     
     # 3. Scan Subreddits
@@ -165,9 +161,9 @@ def run_universal_engine(recipe, model_name):
         
         try:
             subreddit = reddit.subreddit(clean_sub)
-            query = " OR ".join([str(k) for k in keywords])
+            # Use all keywords combined
+            query = " OR ".join([str(k) for k in keywords[:5]]) # Limit to 5 keywords for query length
             
-            # Fetch last 10 posts
             for post in subreddit.search(query, sort="relevance", time_filter="month", limit=10):
                 if post.num_comments > 1: 
                     collected_data.append(f"Title: {post.title}\nBody: {post.selftext[:800]}\nUrl: {post.url}")
@@ -229,7 +225,7 @@ if 'current_recipe' in st.session_state:
     st.divider()
     st.subheader("📋 Research Strategy")
     
-    # We force the data editor to be more forgiving
+    # Using container width to ensure columns are visible
     edited_recipe = st.data_editor(st.session_state['current_recipe'], num_rows="dynamic", use_container_width=True)
     
     if st.button("🚀 Launch Research", type="primary"):
